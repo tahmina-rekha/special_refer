@@ -2,13 +2,14 @@
 import os
 import json
 from flask import Flask, request, jsonify
-
+from flask_cors import CORS # Import CORS
 # Import SMTP libraries
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 app = Flask(__name__)
+CORS(app) # Enable CORS for your Flask app
 
 # --- SMTP Credentials (ENSURE THESE ARE SET AS ENVIRONMENT VARIABLES IN CLOUD RUN) ---
 # These variables should be configured in your Cloud Run service settings, NOT hardcoded here.
@@ -35,11 +36,13 @@ def send_email_via_smtp(to_email, subject, plain_text_content, html_content):
         msg["To"] = to_email
         msg["Subject"] = subject
 
+        # Attach plain text and HTML versions
         part1 = MIMEText(plain_text_content, "plain")
         part2 = MIMEText(html_content, "html")
         msg.attach(part1)
         msg.attach(part2)
 
+        # Connect to the SMTP server and send the email
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
             # Start TLS encryption for security (standard for port 587)
             server.starttls()
@@ -132,7 +135,7 @@ def send_referral_email_backend():
             "success": email_success,
             "message": email_message
         }
-        return jsonify(response_data), 200 if email_success else 500
+        return jsonify(response_data), 200 # Always return 200, success field indicates email status
 
     except Exception as e:
         print(f"Error in specialist referral email backend: {e}")

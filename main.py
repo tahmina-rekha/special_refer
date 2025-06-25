@@ -78,12 +78,12 @@ def send_referral_email_backend():
         request_data = request.get_json()
         
         # --- Robustly extract parameters, handling potential nested object format from agent ---
-        # Function to safely extract string values from potentially nested objects
+        # Corrected function to safely extract string values from potentially nested dictionaries
         def get_string_param(data_dict, key, default_value=None):
             value = data_dict.get(key)
             if isinstance(value, dict) and value: # If it's a non-empty dictionary
-                # Assume the key of the dictionary is the actual string value
-                return list(value.keys())[0] if value else default_value
+                # Corrected: Extract the VALUE of the first item in the dictionary
+                return list(value.values())[0] if value else default_value
             return value if value is not None else default_value
 
 
@@ -98,13 +98,15 @@ def send_referral_email_backend():
         # --- Input Validation (using a simple regex for email) ---
         email_regex = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
         
-        # NEW: Explicitly check for literal problematic strings
+        # Explicitly check for literal problematic strings
         if recipient_email in ['email', 'recipient_email']:
             print(f"DEBUG: Detected problematic literal string as email: '{recipient_email}'")
             return jsonify({"success": False, "message": "Invalid recipient email format provided. Please ensure it's a standard email address like example@domain.com."}), 400
 
         if not all([recipient_email, patient_name, referring_doctor, treatment_details]):
+            print(f"DEBUG: Missing required referral details: recipient_email={recipient_email}, patient_name={patient_name}, referring_doctor={referring_doctor}, treatment_details={treatment_details}")
             return jsonify({"success": False, "message": "Missing one or more required referral details (recipient_email, patient_name, referring_doctor, treatment_details)."}), 400
+        
         if not isinstance(recipient_email, str) or not re.match(email_regex, recipient_email):
             print(f"DEBUG: Invalid email format detected for: '{recipient_email}' (type: {type(recipient_email)})")
             return jsonify({"success": False, "message": "Invalid recipient email format provided. Please ensure it's a standard email address like example@domain.com."}), 400

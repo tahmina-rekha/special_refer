@@ -1,6 +1,7 @@
 # main.py (for your 'special-referral-email' Cloud Run service)
 import os
 import json
+import re # Import the re module for regular expressions
 from flask import Flask, request, jsonify
 from flask_cors import CORS # Import CORS
 # Import SMTP libraries
@@ -36,13 +37,11 @@ def send_email_via_smtp(to_email, subject, plain_text_content, html_content):
         msg["To"] = to_email
         msg["Subject"] = subject
 
-        # Attach plain text and HTML versions
         part1 = MIMEText(plain_text_content, "plain")
         part2 = MIMEText(html_content, "html")
         msg.attach(part1)
         msg.attach(part2)
 
-        # Connect to the SMTP server and send the email
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
             # Start TLS encryption for security (standard for port 587)
             server.starttls()
@@ -84,12 +83,14 @@ def send_referral_email_backend():
         treatment_details = request_data.get('treatment_details')
         urgent = request_data.get('urgent', False) # Optional, default to False
 
-        # --- Input Validation ---
-        # Basic checks for required fields and email format
+        # --- Input Validation (using a simple regex for email) ---
+        email_regex = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
         if not all([recipient_email, patient_name, referring_doctor, treatment_details]):
             return jsonify({"success": False, "message": "Missing one or more required referral details (recipient_email, patient_name, referring_doctor, treatment_details)."}), 400
-        if '@' not in recipient_email or '.' not in recipient_email:
-            return jsonify({"success": False, "message": "Invalid recipient email format provided."}), 400
+        if not re.match(email_regex, recipient_email):
+            # NEW: Added a print statement to see the exact value received for recipient_email
+            print(f"DEBUG: Invalid email format detected for: '{recipient_email}'")
+            return jsonify({"success": False, "message": "Invalid recipient email format provided. Please ensure it's a standard email address like example@domain.com."}), 400
 
         # --- Logging incoming request for debugging ---
         print(f"Received referral request:")

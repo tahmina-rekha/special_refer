@@ -97,6 +97,12 @@ def send_referral_email_backend():
 
         # --- Input Validation (using a simple regex for email) ---
         email_regex = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+        
+        # NEW: Explicitly check for literal problematic strings
+        if recipient_email in ['email', 'recipient_email']:
+            print(f"DEBUG: Detected problematic literal string as email: '{recipient_email}'")
+            return jsonify({"success": False, "message": "Invalid recipient email format provided. Please ensure it's a standard email address like example@domain.com."}), 400
+
         if not all([recipient_email, patient_name, referring_doctor, treatment_details]):
             return jsonify({"success": False, "message": "Missing one or more required referral details (recipient_email, patient_name, referring_doctor, treatment_details)."}), 400
         if not isinstance(recipient_email, str) or not re.match(email_regex, recipient_email):
@@ -131,7 +137,6 @@ def send_referral_email_backend():
             f"<p><strong>Referring Doctor:</strong> {referring_doctor}</p>"
             f"<p><strong>Urgency:</strong> {'<span style=\"color: red; font-weight: bold;\">URGENT</span>' if urgent else 'Routine'}</p>"
             f"<p><strong>Treatment Details:</strong><br>{treatment_details.replace('\n', '<br>')}</p>"
-            f"<p>Please review and contact the patient as appropriate.</p>"
             f"<p>Sincerely,<br>AI Medical Assistant (Simulated System - Do Not Reply)</p>"
         )
 

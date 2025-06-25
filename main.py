@@ -37,11 +37,13 @@ def send_email_via_smtp(to_email, subject, plain_text_content, html_content):
         msg["To"] = to_email
         msg["Subject"] = subject
 
+        # Attach plain text and HTML versions
         part1 = MIMEText(plain_text_content, "plain")
         part2 = MIMEText(html_content, "html")
         msg.attach(part1)
         msg.attach(part2)
 
+        # Connect to the SMTP server and send the email
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
             # Start TLS encryption for security (standard for port 587)
             server.starttls()
@@ -75,21 +77,30 @@ def send_referral_email_backend():
     try:
         request_data = request.get_json()
         
-        # Extract all parameters from the request body as defined in OpenAPI
-        recipient_email = request_data.get('recipient_email')
-        patient_name = request_data.get('patient_name')
-        patient_id = request_data.get('patient_id', 'N/A') # Optional, default if not provided
-        referring_doctor = request_data.get('referring_doctor')
-        treatment_details = request_data.get('treatment_details')
-        urgent = request_data.get('urgent', False) # Optional, default to False
+        # --- Robustly extract parameters, handling potential nested object format from agent ---
+        # Function to safely extract string values from potentially nested objects
+        def get_string_param(data_dict, key, default_value=None):
+            value = data_dict.get(key)
+            if isinstance(value, dict) and value: # If it's a non-empty dictionary
+                # Assume the key of the dictionary is the actual string value
+                return list(value.keys())[0] if value else default_value
+            return value if value is not None else default_value
+
+
+        recipient_email = get_string_param(request_data, 'recipient_email')
+        patient_name = get_string_param(request_data, 'patient_name')
+        patient_id = get_string_param(request_data, 'patient_id', 'N/A')
+        referring_doctor = get_string_param(request_data, 'referring_doctor')
+        treatment_details = get_string_param(request_data, 'treatment_details')
+        urgent = request_data.get('urgent', False) # Boolean should not be affected by this parsing
+
 
         # --- Input Validation (using a simple regex for email) ---
         email_regex = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
         if not all([recipient_email, patient_name, referring_doctor, treatment_details]):
             return jsonify({"success": False, "message": "Missing one or more required referral details (recipient_email, patient_name, referring_doctor, treatment_details)."}), 400
-        if not re.match(email_regex, recipient_email):
-            # NEW: Added a print statement to see the exact value received for recipient_email
-            print(f"DEBUG: Invalid email format detected for: '{recipient_email}'")
+        if not isinstance(recipient_email, str) or not re.match(email_regex, recipient_email):
+            print(f"DEBUG: Invalid email format detected for: '{recipient_email}' (type: {type(recipient_email)})")
             return jsonify({"success": False, "message": "Invalid recipient email format provided. Please ensure it's a standard email address like example@domain.com."}), 400
 
         # --- Logging incoming request for debugging ---

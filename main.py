@@ -147,11 +147,13 @@ def get_string_param(data_dict, key, default_value=None):
     return value if value is not None else default_value
 
 # --- Main route for the specialist referral email tool ---
+# This endpoint corresponds to the '/send_referral_email' path in your OpenAPI YAML
 @app.route('/send_referral_email', methods=['POST'])
 def send_referral_email_backend():
     """
     Handles incoming POST requests from the AI agent to book a specialist appointment,
     send confirmation emails to both patient and specialist, and store details to Firestore.
+    This function corresponds to the 'refer_specialist' operationId in the OpenAPI spec.
     """
     try:
         request_data = request.get_json()
@@ -167,7 +169,7 @@ def send_referral_email_backend():
 
         symptoms = get_string_param(request_data, 'symptoms', 'unspecified symptoms')
         duration_value = request_data.get('duration_value')
-        duration_unit = get_string_param(request_data, 'duration_unit')
+        duration_unit = get_string_param(data_dict=request_data, key='duration_unit') # Explicitly pass data_dict
 
         # --- Input Validation ---
         email_regex = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
@@ -230,7 +232,7 @@ def send_referral_email_backend():
             f"--- Patient Symptoms & Treatment Details ---\n{treatment_details}\n\n"
             f"--- Patient History (from record) ---\n{patient_history}\n\n"
             f"Please review and contact the patient as appropriate regarding this appointment.\n\n"
-            f"Sincerely,\nAI Medical Assistant (Simulated System - Do Not Reply)"
+            f"Sincerely,\nAI Medical Assistant (System for Learning - Do Not Reply)"
         )
         
         specialist_html_body = (
@@ -242,33 +244,33 @@ def send_referral_email_backend():
             f"<p><strong>Patient Symptoms & Treatment Details:</strong><br>{treatment_details.replace('\n', '<br>')}</p>"
             f"<p><strong>Patient History (from record):</strong><br>{patient_history.replace('\n', '<br>')}</p>"
             f"<p>Please review and contact the patient as appropriate regarding this appointment.</p>"
-            f"<p>Sincerely,<br>AI Medical Assistant (Simulated System - Do Not Reply)</p>"
+            f"<p>Sincerely,<br>AI Medical Assistant (System for Learning - Do Not Reply)</p>"
         )
 
         # --- Construct Patient Email Content ---
         patient_subject = f"Your Specialist Appointment Confirmation: {appointment_id}"
         patient_plain_text_body = (
             f"Dear {patient_name},\n\n"
-            f"Your simulated specialist appointment has been booked.\n"
+            f"Your specialist appointment has been booked.\n"
             f"Appointment ID: {appointment_id}\n"
             f"Date: {final_appointment_date}\n"
             f"Time: {final_appointment_time}\n"
             f"Referring Doctor: {referring_doctor}\n"
             f"Reason for visit: {symptoms}\n\n"
             f"Further details will be provided by the specialist's office.\n\n"
-            f"Please remember: This is a simulated confirmation for learning purposes only. "
+            f"Please remember: This is a confirmation for learning purposes only. "
             f"Always consult a real healthcare professional for actual medical needs."
         )
         patient_html_body = (
             f"<p><strong>Dear {patient_name},</strong></p>"
-            f"<p>Your simulated specialist appointment has been booked.</p>"
+            f"<p>Your specialist appointment has been booked.</p>"
             f"<p><strong>Appointment ID:</strong> {appointment_id}</p>"
             f"<p><strong>Date:</strong> {final_appointment_date}</p>"
             f"<p><strong>Time:</strong> {final_appointment_time}</p>"
             f"<p><strong>Referring Doctor:</strong> {referring_doctor}</p>"
             f"<p><strong>Reason for visit:</strong> {symptoms}</p>"
             f"<p>Further details will be provided by the specialist's office.</p>"
-            f"<p>Please remember: This is a simulated confirmation for learning purposes only. "
+            f"<p>Please remember: This is a confirmation for learning purposes only. "
             f"Always consult a real healthcare professional for actual medical needs.</p>"
         )
 

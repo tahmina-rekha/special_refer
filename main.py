@@ -117,10 +117,12 @@ def save_appointment_to_firestore(appointment_details, collection_name="speciali
         print(f"Error saving appointment to Firestore: {e}")
         return False, f"Failed to save appointment to database: {str(e)}"
 
-# --- Helper function to manage patient profiles ---
+# --- Helper function to manage patient profiles (UPDATED TO QUERY BY FIELD AND USE PATIENT_ID AS DOC ID FOR NEW) ---
 def save_or_update_patient_profile(patient_data):
     """
     Saves or updates a patient profile in the 'patients' collection.
+    If a profile with the given patient_id field exists, it updates it.
+    Otherwise, it creates a new document using the provided patient_id as the document ID.
     """
     if db is None:
         print("ERROR: Firestore client (db) is not initialized. Cannot save patient profile.")
@@ -128,46 +130,76 @@ def save_or_update_patient_profile(patient_data):
 
     try:
         patients_collection_path = f"artifacts/{app_id}/public/data/patients"
-        doc_ref = db.collection(patients_collection_path).document(patient_data['patient_id'])
         
-        existing_doc = doc_ref.get()
-        if existing_doc.exists:
+        # Query for the document where the 'patient_id' field matches
+        # This is correct for finding an existing patient by their patient_id field
+        query_ref = db.collection(patients_collection_path).where('patient_id', '==', patient_data['patient_id']).limit(1)
+        docs = query_ref.stream()
+        
+        existing_doc = None
+        for doc in docs:
+            existing_doc = doc
+            break # Get the first (and should be only) matching document
+
+        if existing_doc:
+            # Logic for updating an existing profile
+            existing_data = existing_doc.to_dict()
             updated_data = {
                 "last_updated": firestore.SERVER_TIMESTAMP
             }
             # Only update fields if they are provided and different from existing
-            if patient_data.get('name') and patient_data['name'] != existing_doc.to_dict().get('name'):
+            if patient_data.get('name') and patient_data['name'] != existing_data.get('name'):
                 updated_data['name'] = patient_data['name']
-            if patient_data.get('email') and patient_data['email'] != existing_doc.to_dict().get('email'):
+            if patient_data.get('email') and patient_data['email'] != existing_data.get('email'):
                 updated_data['email'] = patient_data['email']
-            if patient_data.get('date_of_birth') and patient_data['date_of_birth'] != existing_doc.to_dict().get('date_of_birth'):
+            if patient_data.get('date_of_birth') and patient_data['date_of_birth'] != existing_data.get('date_of_birth'):
                 updated_data['date_of_birth'] = patient_data['date_of_birth']
-            if patient_data.get('phone_number') and patient_data['phone_number'] != existing_doc.to_dict().get('phone_number'):
+            if patient_data.get('phone_number') and patient_data['phone_number'] != existing_data.get('phone_number'):
                 updated_data['phone_number'] = patient_data['phone_number']
-            if patient_data.get('address') and patient_data['address'] != existing_doc.to_dict().get('address'):
+            if patient_data.get('address') and patient_data['address'] != existing_data.get('address'):
                 updated_data['address'] = patient_data['address']
             
             if updated_data: # Only update if there are changes
+                doc_ref = db.collection(patients_collection_path).document(existing_doc.id) # Use actual document ID
                 doc_ref.update(updated_data)
-                print(f"Patient profile {patient_data['patient_id']} updated.")
+                print(f"Patient profile {patient_data['patient_id']} updated. Document ID: {existing_doc.id}")
             else:
-                print(f"Patient profile {patient_data['patient_id']} exists, no new data to update.")
+                print(f"Patient profile {patient_data['patient_id']} exists, no new data to update. Document ID: {existing_doc.id}")
             return True, "Patient profile updated."
         else:
-            # Create new profile
+            # Logic for creating a new profile: use patient_id as the document ID
+            if not patient_data.get('patient_id'):
+                print("ERROR: Cannot create new patient profile. 'patient_id' is missing from patient_data.")
+                return False, "Cannot create new patient profile: 'patient_id' is missing."
+
+            new_doc_id = patient_data['patient_id'] # Use the provided patient_id as the document ID
+            new_doc_ref = db.collection(patients_collection_path).document(new_doc_id)
+            
+            # This is a safeguard: if a document with this exact ID already exists
+            # (e.g., if patient_id was previously used as doc ID directly),
+            # we should update it instead of trying to create a duplicate.
+            if new_doc_ref.get().exists:
+                print(f"Warning: Document with ID '{new_doc_id}' already exists. Attempting to update it instead of creating new.")
+                existing_data = new_doc_ref.get().to_dict()
+                merged_data = {**existing_data, **patient_data}
+                merged_data["last_updated"] = firestore.SERVER_TIMESTAMP
+                new_doc_ref.set(merged_data) # Use set to overwrite/merge
+                print(f"Patient profile {patient_data['patient_id']} updated (merged existing data at document ID {new_doc_id}).")
+                return True, "Patient profile updated."
+
             patient_data['created_at'] = firestore.SERVER_TIMESTAMP
             patient_data['last_updated'] = firestore.SERVER_TIMESTAMP
-            doc_ref.set(patient_data)
-            print(f"New patient profile {patient_data['patient_id']} created.")
+            new_doc_ref.set(patient_data) # Create the new document with patient_id as its ID
+            print(f"New patient profile {patient_data['patient_id']} created. Document ID: {new_doc_id}")
             return True, "New patient profile created."
     except Exception as e:
         print(f"Error saving/updating patient profile to Firestore: {e}")
         return False, f"Failed to save/update patient profile: {str(e)}"
 
-# --- Helper function to get patient profile from Firestore ---
+# --- Helper function to get patient profile from Firestore (UPDATED TO QUERY BY FIELD) ---
 def get_patient_profile_from_firestore(patient_id):
     """
-    Retrieves a patient's profile from the 'patients' collection.
+    Retrieves a patient's profile from the 'patients' collection by querying on the 'patient_id' field.
     Returns (patient_data_dict, True) if found, (None, False) if not found or error.
     """
     if db is None:
@@ -176,15 +208,17 @@ def get_patient_profile_from_firestore(patient_id):
 
     try:
         patients_collection_path = f"artifacts/{app_id}/public/data/patients"
-        doc_ref = db.collection(patients_collection_path).document(patient_id)
-        doc = doc_ref.get()
+        
+        # Query for the document where the 'patient_id' field matches
+        query_ref = db.collection(patients_collection_path).where('patient_id', '==', patient_id).limit(1)
+        docs = query_ref.stream()
 
-        if doc.exists:
-            print(f"Patient profile found for ID: {patient_id}")
+        for doc in docs:
+            print(f"Patient profile found for ID: {patient_id}. Document ID: {doc.id}")
             return doc.to_dict(), True
-        else:
-            print(f"No patient profile found for ID: {patient_id}")
-            return None, False
+        
+        print(f"No patient profile found for ID: {patient_id} in the 'patient_id' field.")
+        return None, False
     except Exception as e:
         print(f"Error retrieving patient profile from Firestore: {e}")
         return None, False
@@ -286,7 +320,7 @@ def send_referral_email_backend():
             patient_profile, profile_found = get_patient_profile_from_firestore(patient_id)
             
             if not profile_found:
-                print(f"Warning: Patient profile not found for ID: {patient_id}. Proceeding as new patient for this ID.")
+                print(f"Warning: Patient profile not found for ID: {patient_id}. Attempting to create new patient profile.")
                 # If profile not found, use the name from the request and generate a new ID if 'N/A'
                 if patient_id == 'N/A': # Only generate new ID if it was N/A initially
                     patient_id = f"PATIENT_{os.urandom(4).hex()}"

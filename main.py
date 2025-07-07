@@ -22,23 +22,20 @@ db = None
 
 # --- Firebase Initialization ---
 # Cloud Run provides default credentials for the service account.
-# This block runs at global scope during module import.
 if not firebase_admin._apps:
     try:
-        # Use Application Default Credentials (ADC) provided by Cloud Run environment
         cred = credentials.ApplicationDefault()
         firebase_admin.initialize_app(cred)
         print("Firebase Admin SDK initialized successfully using Application Default Credentials.")
-        # Specify the database ID when getting the Firestore client using 'database_id'
         db = firestore.client(database_id="book-appointment") # Use your named Firestore database
         print("Firestore client initialized for database 'book-appointment'.")
     except Exception as e:
         print(f"CRITICAL ERROR: Failed to initialize Firebase Admin SDK or Firestore client at startup: {e}")
-        raise # Re-raise to ensure Cloud Run sees the crash and reports it properly.
+        raise
 else:
     try:
         db = firestore.client(database_id="book-appointment")
-        print("Firebase app already initialized, Firestore client obtained.")
+        print("Firestore client initialized for database 'book-appointment'.")
     except Exception as e:
         print(f"CRITICAL ERROR: Failed to obtain Firestore client when Firebase app already initialized: {e}")
         raise
@@ -52,6 +49,11 @@ SMTP_PORT = int(os.environ.get('SMTP_PORT', 587))
 SMTP_USERNAME = os.environ.get('SMTP_USERNAME')
 SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD')
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'niljoshna28@gmail.com')
+
+# --- Hardcoded Specialist Details ---
+# These are now hardcoded as per your request, and not passed from the agent.
+SPECIALIST_EMAIL = "niljoshna28@gmail.com"
+REFERRING_DOCTOR_NAME = "Lee Paul"
 
 # --- Helper function for sending email via SMTP ---
 def send_email_via_smtp(to_email, subject, plain_text_content, html_content):
@@ -187,29 +189,63 @@ def get_patient_profile_from_firestore(patient_id):
         print(f"Error retrieving patient profile from Firestore: {e}")
         return None, False
 
-# --- Helper function to retrieve patient history from Firestore ---
-def get_patient_history_from_firestore(patient_id):
+# --- NEW ENDPOINT: Get GP Doctor Name from Appointments Collection ---
+@app.route('/get_gp_doctor', methods=['POST'])
+def get_gp_doctor_backend():
     """
-    Retrieves a patient's medical history from Firestore.
-    Collection path: /artifacts/{appId}/public/data/patient_history
+    Retrieves the doctor's name from the most recent GP appointment in Firestore
+    for a given patient_id.
     """
     if db is None:
-        return "Firestore client not initialized. Cannot retrieve history.", False
-
+        return jsonify({"success": False, "message": "Firestore client not initialized."}), 500
+    
     try:
-        collection_path = f"artifacts/{app_id}/public/data/patient_history"
-        doc_ref = db.collection(collection_path).document(patient_id)
-        doc = doc_ref.get()
+        request_data = request.get_json()
+        patient_id = get_string_param(request_data, 'patient_id')
 
-        if doc.exists:
+        if not patient_id:
+            return jsonify({"success": False, "message": "Patient ID is required."}), 400
+
+        appointments_collection_path = f"artifacts/{app_id}/public/data/appointments"
+        
+        # Query for GP appointments for the patient, ordered by timestamp descending
+        # NOTE: Firestore does not support orderBy on multiple fields without an index.
+        # We will fetch all and sort in Python.
+        query_ref = db.collection(appointments_collection_path).where('patient_id', '==', patient_id)
+        # Add a filter for 'GP' appointment type if desired, but it requires an index
+        # query_ref = query_ref.where('appointment_type', '==', 'GP')
+
+        docs = query_ref.stream() # Get all matching documents
+
+        gp_appointments = []
+        for doc in docs:
             data = doc.to_dict()
-            history_details = data.get('history_details', 'No detailed history available.')
-            return history_details, True
+            # Filter for GP appointments and valid timestamps in Python
+            if data.get('appointment_type') == 'GP' and 'timestamp' in data:
+                gp_appointments.append(data)
+        
+        # Sort appointments by timestamp in descending order (most recent first)
+        gp_appointments.sort(key=lambda x: x['timestamp'], reverse=True)
+
+        doctor_name = None
+        if gp_appointments:
+            doctor_name = gp_appointments[0].get('doctor_name')
+            if doctor_name == "a GP doctor": # If it's the generic placeholder, treat as not found
+                doctor_name = None
+            print(f"Found GP doctor '{doctor_name}' for patient ID: {patient_id}")
         else:
-            return "No medical history found for this patient ID.", False
+            print(f"No GP doctor found for patient ID: {patient_id}")
+
+        return jsonify({
+            "success": doctor_name is not None,
+            "doctor_name": doctor_name,
+            "message": "GP doctor retrieved successfully." if doctor_name else "No GP doctor found for this patient."
+        }), 200
+
     except Exception as e:
-        print(f"Error retrieving patient history from Firestore: {e}")
-        return f"Error retrieving patient history: {str(e)}", False
+        print(f"Error retrieving GP doctor: {e}")
+        return jsonify({"success": False, "error": f"Internal server error: {str(e)}"}), 500
+
 
 # --- Helper function to safely extract string values from potentially nested dictionaries ---
 def get_string_param(data_dict, key, default_value=None):
@@ -219,84 +255,140 @@ def get_string_param(data_dict, key, default_value=None):
     return value if value is not None else default_value
 
 # --- Main route for the specialist referral email tool ---
-# This endpoint corresponds to the '/send_referral_email' path in your OpenAPI YAML
 @app.route('/send_referral_email', methods=['POST'])
 def send_referral_email_backend():
     """
     Handles incoming POST requests from the AI agent to book a specialist appointment,
-    send confirmation emails to both patient and specialist, and store details to Firestore.
+    send confirmation emails to both patient and hardcoded specialist, and store details to Firestore.
     This function corresponds to the 'refer_specialist' operationId in the OpenAPI spec.
     """
     try:
         request_data = request.get_json()
         
-        # Extract all parameters from the request body as defined in OpenAPI
-        recipient_email = get_string_param(request_data, 'recipient_email') # Specialist's email
-        # patient_email is now expected to be looked up, but still accept if passed (nullable in OpenAPI)
-        patient_email_from_request = get_string_param(request_data, 'patient_email') 
-        patient_name = get_string_param(request_data, 'patient_name')
-        patient_id = get_string_param(request_data, 'patient_id', 'N/A') # Patient ID is now collected by playbook
-        referring_doctor = get_string_param(request_data, 'referring_doctor')
+        # Extract parameters from the request
+        patient_id = get_string_param(request_data, 'patient_id', 'N/A')
+        patient_name_from_request = get_string_param(request_data, 'patient_name')
+        # recipient_email is now hardcoded
+        # referring_doctor is now hardcoded
         treatment_details = get_string_param(request_data, 'treatment_details')
         urgent = request_data.get('urgent', False)
 
         symptoms = get_string_param(request_data, 'symptoms', 'unspecified symptoms')
         duration_value = request_data.get('duration_value')
-        duration_unit = get_string_param(data_dict=request_data, key='duration_unit') # Explicitly pass data_dict
+        duration_unit = get_string_param(data_dict=request_data, key='duration_unit')
 
-        # --- Retrieve patient profile from Firestore using patient_id for confirmation email ---
+        # --- Retrieve patient profile from Firestore using patient_id ---
+        patient_profile = None
+        final_patient_name = None
         final_patient_email = None
+
         if patient_id and patient_id != 'N/A':
             patient_profile, profile_found = get_patient_profile_from_firestore(patient_id)
-            if profile_found:
-                final_patient_email = patient_profile.get('email')
-                # If patient_name from request is empty, use name from DB profile
-                if not patient_name and patient_profile.get('name'):
-                    patient_name = patient_profile.get('name')
-                print(f"Retrieved patient email from DB: {final_patient_email} for ID: {patient_id}")
+            
+            if not profile_found:
+                print(f"Warning: Patient profile not found for ID: {patient_id}. Proceeding as new patient for this ID.")
+                # If profile not found, use the name from the request and generate a new ID if 'N/A'
+                if patient_id == 'N/A': # Only generate new ID if it was N/A initially
+                    patient_id = f"PATIENT_{os.urandom(4).hex()}"
+                    print(f"Generated new patient ID: {patient_id}")
+                final_patient_name = patient_name_from_request
+                final_patient_email = None # No email from DB, so it's None initially
             else:
-                print(f"Patient profile not found for ID: {patient_id}. Cannot retrieve patient email from DB.")
-        
-        # If patient_email was passed in the request AND no email was found in DB, use request email
-        if not final_patient_email and patient_email_from_request:
-            final_patient_email = patient_email_from_request
-            print(f"Using patient email from request: {final_patient_email}")
+                # Profile found: Validate name and determine final name/email
+                db_patient_name = patient_profile.get('name')
+                db_patient_email = patient_profile.get('email')
 
+                # Validate if patient_name_from_request matches db_patient_name (if both exist)
+                if patient_name_from_request and db_patient_name and patient_name_from_request.lower() != db_patient_name.lower():
+                    print(f"ERROR: Name mismatch for Patient ID '{patient_id}'. Request name: '{patient_name_from_request}', DB name: '{db_patient_name}'.")
+                    return jsonify({
+                        "success": False,
+                        "message": f"Patient name '{patient_name_from_request}' does not match the name '{db_patient_name}' registered for Patient ID '{patient_id}'. Please verify."
+                    }), 400
+                
+                # Determine final patient name: Prioritize DB name if found, otherwise use request name
+                final_patient_name = db_patient_name if db_patient_name else patient_name_from_request
+                # Determine final patient email: Prioritize DB email if found
+                final_patient_email = db_patient_email
+
+        else: # No patient_id provided by agent, so generate a new one
+            patient_id = f"PATIENT_{os.urandom(4).hex()}"
+            print(f"Generated new patient ID: {patient_id}")
+            final_patient_name = patient_name_from_request
+            final_patient_email = None # No email from DB, so it's None initially
+
+
+        # Prepare patient data for saving/updating in the patient profile database
+        # Use the name from the current request to ensure the latest name is persisted, if available.
+        # Otherwise, use the final_patient_name determined above.
+        name_to_save_in_profile = patient_name_from_request if patient_name_from_request else final_patient_name
+        patient_profile_data_to_save = {
+            "patient_id": patient_id,
+            "name": name_to_save_in_profile, 
+            "email": final_patient_email, 
+            # Add other fields like 'date_of_birth', 'phone_number', 'address' here if collected
+        }
+        patient_profile_data_to_save = {k: v for k, v in patient_profile_data_to_save.items() if v is not None}
+
+        # Save or update the patient profile in Firestore
+        if patient_profile_data_to_save:
+            profile_save_success, profile_save_message = save_or_update_patient_profile(patient_profile_data_to_save)
+            if not profile_save_success:
+                print(f"Warning: Failed to save/update patient profile: {profile_save_message}")
 
         # --- Input Validation ---
         email_regex = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
         
-        if not all([recipient_email, patient_name, referring_doctor, treatment_details]):
-            return jsonify({"success": False, "message": "Missing one or more required referral details (recipient_email, patient_name, referring_doctor, treatment_details)."}), 400
+        # DEBUG PRINTS START
+        print(f"DEBUG: final_patient_name: '{final_patient_name}' (type: {type(final_patient_name)})")
+        print(f"DEBUG: treatment_details: '{treatment_details}' (type: {type(treatment_details)})")
+        print(f"DEBUG: All required fields check: {all([final_patient_name, treatment_details])}") # Removed recipient_email, referring_doctor
+        print(f"DEBUG: Specialist email regex match: {re.match(email_regex, SPECIALIST_EMAIL) is not None}")
+        # DEBUG PRINTS END
+
+        missing_fields = []
+        if not final_patient_name:
+            missing_fields.append("patient_name")
+        if not treatment_details:
+            missing_fields.append("treatment_details")
+        # recipient_email and referring_doctor are now hardcoded, so no need to check if they are missing from input
+
+        if missing_fields:
+            error_message = f"Missing required referral details: {', '.join(missing_fields)}."
+            print(f"ERROR: {error_message}")
+            return jsonify({"success": False, "message": error_message}), 400
         
-        if not isinstance(recipient_email, str) or not re.match(email_regex, recipient_email):
-            return jsonify({"success": False, "message": "Invalid recipient email format provided."}), 400
+        # Validate hardcoded specialist email
+        if not isinstance(SPECIALIST_EMAIL, str) or not re.match(email_regex, SPECIALIST_EMAIL):
+            print(f"CRITICAL ERROR: Hardcoded specialist email format is invalid: '{SPECIALIST_EMAIL}'")
+            return jsonify({"success": False, "message": "Internal configuration error: Invalid specialist email format."}), 500
         
         # Validate patient email only if a final_patient_email is determined
         if final_patient_email and (not isinstance(final_patient_email, str) or not re.match(email_regex, final_patient_email)):
-            return jsonify({"success": False, "message": "Invalid patient email format (retrieved or provided). Please ensure patient has a valid email in database."}), 400
+            print(f"ERROR: Invalid patient email format from database: '{final_patient_email}'")
+            return jsonify({"success": False, "message": "Invalid patient email format from database."}), 400 # Changed message
 
-        # --- Assign Specialist Appointment Date/Time (similar to GP booking logic) ---
+        # --- Assign Specialist Appointment Date/Time ---
         assigned_date = None
         assigned_time = "09:00"
-        appointment_type = "Specialist" # Fixed for this tool
+        appointment_type = "Specialist"
 
         now = datetime.now()
         if duration_value is not None and duration_unit:
             if duration_unit == 'days' and duration_value <= 7:
-                assigned_date = now + timedelta(weeks=2) # Specialist usually further out
+                assigned_date = now + timedelta(weeks=2)
                 assigned_time = "10:00"
-            elif duration_unit == 'weeks' and duration_value <= 4: # Up to 4 weeks
+            elif duration_unit == 'weeks' and duration_value <= 4:
                 assigned_date = now + timedelta(weeks=3)
                 assigned_time = "14:00"
             elif (duration_unit == 'months' and duration_value >= 1) or (duration_unit == 'weeks' and duration_value > 4):
-                assigned_date = now + timedelta(weeks=6) # Even further out for chronic/long-term
+                assigned_date = now + timedelta(weeks=6)
                 assigned_time = "11:00"
             else:
-                assigned_date = now + timedelta(weeks=3) # Default for specialist
+                assigned_date = now + timedelta(weeks=3)
                 assigned_time = "09:30"
         else:
-            assigned_date = now + timedelta(weeks=3) # Default if no duration provided
+            assigned_date = now + timedelta(weeks=3)
             assigned_time = "09:00"
         
         final_appointment_date = assigned_date.strftime('%Y-%m-%d')
@@ -305,21 +397,18 @@ def send_referral_email_backend():
         # --- Generate Appointment ID ---
         appointment_id = f"SPEC-{patient_id.replace('N/A', 'UNKNOWN')[:5]}-{os.urandom(3).hex()}"
 
-        # --- Retrieve Patient History (Conceptual/Simulated) ---
-        patient_history, history_retrieved_success = get_patient_history_from_firestore(patient_id)
-        if not history_retrieved_success:
-            print(f"Warning: Could not retrieve patient history for {patient_id}: {patient_history}")
-            patient_history = "No detailed history found or could be retrieved."
+        patient_history = "No detailed history available." # Placeholder since function is removed
+        history_retrieved_success = False
         
         # --- Construct Specialist Email Content ---
         urgency_prefix = "URGENT: " if urgent else ""
-        specialist_subject = f"{urgency_prefix}Specialist Referral for {patient_name} (Patient ID: {patient_id})"
+        specialist_subject = f"{urgency_prefix}Specialist Referral for {final_patient_name} (Patient ID: {patient_id})"
         
         specialist_plain_text_body = (
             f"Dear Specialist/Referral Department,\n\n"
-            f"This is a referral for patient {patient_name} (Patient ID: {patient_id}).\n"
+            f"This is a referral for patient {final_patient_name} (Patient ID: {patient_id}).\n"
             f"Assigned Appointment: {final_appointment_date} at {final_appointment_time}\n"
-            f"Referring Doctor: {referring_doctor}\n"
+            f"Referring Doctor: {REFERRING_DOCTOR_NAME}\n" # Using hardcoded referring doctor
             f"Urgency: {'Urgent' if urgent else 'Routine'}\n\n"
             f"--- Patient Symptoms & Treatment Details ---\n{treatment_details}\n\n"
             f"--- Patient History (from record) ---\n{patient_history}\n\n"
@@ -329,9 +418,9 @@ def send_referral_email_backend():
         
         specialist_html_body = (
             f"<p><strong>Dear Specialist/Referral Department,</strong></p>"
-            f"<p>This is a referral for patient <strong>{patient_name}</strong> (Patient ID: {patient_id}).</p>"
+            f"<p>This is a referral for patient <strong>{final_patient_name}</strong> (Patient ID: {patient_id}).</p>"
             f"<p><strong>Assigned Appointment:</strong> {final_appointment_date} at {final_appointment_time}</p>"
-            f"<p><strong>Referring Doctor:</strong> {referring_doctor}</p>"
+            f"<p><strong>Referring Doctor:</strong> {REFERRING_DOCTOR_NAME}</p>" # Using hardcoded referring doctor
             f"<p><strong>Urgency:</strong> {'<span style=\"color: red; font-weight: bold;\">URGENT</span>' if urgent else 'Routine'}</p>"
             f"<p><strong>Patient Symptoms & Treatment Details:</strong><br>{treatment_details.replace('\n', '<br>')}</p>"
             f"<p><strong>Patient History (from record):</strong><br>{patient_history.replace('\n', '<br>')}</p>"
@@ -342,24 +431,24 @@ def send_referral_email_backend():
         # --- Construct Patient Email Content ---
         patient_subject = f"Your Specialist Appointment Confirmation: {appointment_id}"
         patient_plain_text_body = (
-            f"Dear {patient_name},\n\n"
+            f"Dear {final_patient_name},\n\n"
             f"Your specialist appointment has been booked.\n"
             f"Appointment ID: {appointment_id}\n"
             f"Date: {final_appointment_date}\n"
             f"Time: {final_appointment_time}\n"
-            f"Referring Doctor: {referring_doctor}\n"
+            f"Referring Doctor: {REFERRING_DOCTOR_NAME}\n" # Using hardcoded referring doctor
             f"Reason for visit: {symptoms}\n\n"
             f"Further details will be provided by the specialist's office.\n\n"
             f"Please remember: This is a confirmation for learning purposes only. "
             f"Always consult a real healthcare professional for actual medical needs."
         )
         patient_html_body = (
-            f"<p><strong>Dear {patient_name},</strong></p>"
+            f"<p><strong>Dear {final_patient_name},</strong></p>"
             f"<p>Your specialist appointment has been booked.</p>"
             f"<p><strong>Appointment ID:</strong> {appointment_id}</p>"
             f"<p><strong>Date:</strong> {final_appointment_date}</p>"
             f"<p><strong>Time:</strong> {final_appointment_time}</p>"
-            f"<p><strong>Referring Doctor:</strong> {referring_doctor}</p>"
+            f"<p><strong>Referring Doctor:</strong> {REFERRING_DOCTOR_NAME}</p>" # Using hardcoded referring doctor
             f"<p><strong>Reason for visit:</strong> {symptoms}</p>"
             f"<p>Further details will be provided by the specialist's office.</p>"
             f"<p>Please remember: This is a confirmation for learning purposes only. "
@@ -368,7 +457,7 @@ def send_referral_email_backend():
 
         # --- Attempt to send emails ---
         specialist_email_sent_status, specialist_email_message = send_email_via_smtp(
-            to_email=recipient_email,
+            to_email=SPECIALIST_EMAIL, # Using hardcoded specialist email
             subject=specialist_subject,
             plain_text_content=specialist_plain_text_body,
             html_content=specialist_html_body
@@ -384,7 +473,7 @@ def send_referral_email_backend():
                 html_content=patient_html_body
             )
         else:
-            patient_email_message = "Patient email not found in database or invalid format for sending."
+            patient_email_message = "Patient email not found in database or invalid format."
         
         # --- Store appointment details in Firestore ---
         appointment_details_to_store = {
@@ -396,16 +485,16 @@ def send_referral_email_backend():
             "symptoms": symptoms,
             "duration_value": duration_value,
             "duration_unit": duration_unit,
-            "patient_name": patient_name,
-            "specialist_email": recipient_email,
-            "patient_email": final_patient_email, # Store the email that was used/found
-            "referring_doctor": referring_doctor,
+            "patient_name": final_patient_name,
+            "specialist_email": SPECIALIST_EMAIL, # Store hardcoded specialist email
+            "patient_email": final_patient_email,
+            "referring_doctor": REFERRING_DOCTOR_NAME, # Store hardcoded referring doctor
             "treatment_details": treatment_details,
             "urgent": urgent,
             "specialist_email_sent_status": specialist_email_sent_status,
             "patient_email_sent_status": patient_email_sent_status,
             "patient_history_retrieved": history_retrieved_success,
-            "patient_history_summary": patient_history # Store the retrieved history
+            "patient_history_summary": patient_history
         }
         db_save_success, db_save_message = save_appointment_to_firestore(appointment_details_to_store, "specialist_appointments")
         if not db_save_success:
@@ -415,15 +504,13 @@ def send_referral_email_backend():
         response_message = "Specialist appointment booked and emails sent."
         if not specialist_email_sent_status:
             response_message += f" Issue sending specialist email: {specialist_email_message}."
-        if final_patient_email and not patient_email_sent_status: # Only report patient email issue if an email was available
+        if not patient_email_sent_status: # Changed condition
             response_message += f" Issue sending patient email: {patient_email_message}."
-        elif not final_patient_email: # If no patient email was found/provided
-            response_message += f" No patient email was found for confirmation."
         if not db_save_success:
-            response_message += f" Issue saving to database: {db_save_message}."
+            response_message += f" (Note: Failed to save appointment to database: {db_save_message})"
 
         response_data = {
-            "success": specialist_email_sent_status and (not final_patient_email or patient_email_sent_status) and db_save_success, # Overall success logic
+            "success": specialist_email_sent_status and patient_email_sent_status and db_save_success,
             "message": response_message,
             "assigned_date": final_appointment_date,
             "assigned_time": final_appointment_time,
@@ -431,7 +518,7 @@ def send_referral_email_backend():
             "patient_email_sent_status": patient_email_sent_status,
             "specialist_email_sent_status": specialist_email_sent_status,
             "db_save_success": db_save_success,
-            "confirmation_email_address": final_patient_email # Add the email that was used for confirmation
+            "confirmation_email_address": final_patient_email # Add final patient email to response
         }
         return jsonify(response_data), 200
 

@@ -66,6 +66,11 @@ def send_email_via_smtp(to_email, subject, plain_text_content, html_content):
         msg["To"] = to_email
         msg["Subject"] = subject
 
+        part1 = MIMEText(plain_text_content, "plain")
+        part2 = MIMEText(html_content, "html")
+        msg.attach(part1)
+        msg.attach(part2)
+
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
             server.starttls()
             server.login(SMTP_USERNAME, SMTP_PASSWORD)
@@ -74,7 +79,7 @@ def send_email_via_smtp(to_email, subject, plain_text_content, html_content):
         print(f"SMTP email sent successfully to {to_email}")
         return True, "Email sent successfully via SMTP."
 
-    except smtpllib.SMTPAuthenticationError as e:
+    except smtplib.SMTPAuthenticationError as e:
         print(f"SMTP Authentication Error: Check username/password for {SMTP_USERNAME}. Error: {e}")
         return False, f"SMTP authentication failed: {str(e)}. Please check SMTP username and password."
     except smtplib.SMTPConnectError as e:
@@ -179,30 +184,6 @@ def get_patient_profile_from_firestore(patient_id):
         print(f"Error retrieving patient profile from Firestore: {e}")
         return None, False
 
-# --- Helper function to retrieve patient history from Firestore (if separate) ---
-def get_patient_history_from_firestore(patient_id):
-    """
-    Retrieves a patient's medical history from Firestore.
-    Collection path: /artifacts/{appId}/public/data/patient_history
-    """
-    if db is None:
-        return "Firestore client not initialized. Cannot retrieve history.", False
-
-    try:
-        collection_path = f"artifacts/{app_id}/public/data/patient_history"
-        doc_ref = db.collection(collection_path).document(patient_id)
-        doc = doc_ref.get()
-
-        if doc.exists:
-            data = doc.to_dict()
-            history_details = data.get('history_details', 'No detailed history available.')
-            return history_details, True
-        else:
-            return "No medical history found for this patient ID.", False
-    except Exception as e:
-        print(f"Error retrieving patient history from Firestore: {e}")
-        return f"Error retrieving patient history: {str(e)}", False
-
 # --- NEW ENDPOINT: Get GP Doctor Name from Appointments Collection ---
 @app.route('/get_gp_doctor', methods=['POST'])
 def get_gp_doctor_backend():
@@ -282,7 +263,6 @@ def send_referral_email_backend():
         # Extract parameters from the request
         patient_id = get_string_param(request_data, 'patient_id', 'N/A')
         patient_name_from_request = get_string_param(request_data, 'patient_name')
-        # patient_email_from_request = get_string_param(request_data, 'patient_email') # No longer passed by playbook
         recipient_email = get_string_param(request_data, 'recipient_email') # Specialist's email (hardcoded in playbook)
         referring_doctor = get_string_param(request_data, 'referring_doctor')
         treatment_details = get_string_param(request_data, 'treatment_details')
@@ -294,26 +274,53 @@ def send_referral_email_backend():
 
         # --- Retrieve patient profile from Firestore using patient_id ---
         patient_profile = None
-        if patient_id and patient_id != 'N/A': # Only attempt lookup if a valid patient_id is provided
+        final_patient_name = None
+        final_patient_email = None
+
+        if patient_id and patient_id != 'N/A':
             patient_profile, profile_found = get_patient_profile_from_firestore(patient_id)
+            
             if not profile_found:
-                print(f"Warning: Patient profile not found for ID: {patient_id}. Cannot retrieve patient email from DB.")
+                print(f"Warning: Patient profile not found for ID: {patient_id}. Proceeding as new patient for this ID.")
+                # If profile not found, use the name from the request and generate a new ID if 'N/A'
+                if patient_id == 'N/A': # Only generate new ID if it was N/A initially
+                    patient_id = f"PATIENT_{os.urandom(4).hex()}"
+                    print(f"Generated new patient ID: {patient_id}")
+                final_patient_name = patient_name_from_request
+                final_patient_email = None # No email from DB, so it's None initially
+            else:
+                # Profile found: Validate name and determine final name/email
+                db_patient_name = patient_profile.get('name')
+                db_patient_email = patient_profile.get('email')
 
-        # Determine final patient details, prioritizing database if found
-        final_patient_name = patient_profile.get('name') if patient_profile else patient_name_from_request
-        final_patient_email = patient_profile.get('email') if patient_profile else None # Patient email ONLY from DB now
+                # Validate if patient_name_from_request matches db_patient_name (if both exist)
+                if patient_name_from_request and db_patient_name and patient_name_from_request.lower() != db_patient_name.lower():
+                    print(f"ERROR: Name mismatch for Patient ID '{patient_id}'. Request name: '{patient_name_from_request}', DB name: '{db_patient_name}'.")
+                    return jsonify({
+                        "success": False,
+                        "message": f"Patient name '{patient_name_from_request}' does not match the name '{db_patient_name}' registered for Patient ID '{patient_id}'. Please verify."
+                    }), 400
+                
+                # Determine final patient name: Prioritize DB name if found, otherwise use request name
+                final_patient_name = db_patient_name if db_patient_name else patient_name_from_request
+                # Determine final patient email: Prioritize DB email if found
+                final_patient_email = db_patient_email
 
-
-        # If patient_id was not provided by agent, or if it was N/A, generate a new one
-        if not patient_id or patient_id == 'N/A':
+        else: # No patient_id provided by agent, so generate a new one
             patient_id = f"PATIENT_{os.urandom(4).hex()}"
             print(f"Generated new patient ID: {patient_id}")
+            final_patient_name = patient_name_from_request
+            final_patient_email = None # No email from DB, so it's None initially
+
 
         # Prepare patient data for saving/updating in the patient profile database
+        # Use the name from the current request to ensure the latest name is persisted, if available.
+        # Otherwise, use the final_patient_name determined above.
+        name_to_save_in_profile = patient_name_from_request if patient_name_from_request else final_patient_name
         patient_profile_data_to_save = {
             "patient_id": patient_id,
-            "name": final_patient_name,
-            "email": final_patient_email,
+            "name": name_to_save_in_profile, 
+            "email": final_patient_email, 
             # Add other fields like 'date_of_birth', 'phone_number', 'address' here if collected
         }
         patient_profile_data_to_save = {k: v for k, v in patient_profile_data_to_save.items() if v is not None}
@@ -378,11 +385,8 @@ def send_referral_email_backend():
         # --- Generate Appointment ID ---
         appointment_id = f"SPEC-{patient_id.replace('N/A', 'UNKNOWN')[:5]}-{os.urandom(3).hex()}"
 
-        # --- Retrieve Patient History (Conceptual/Simulated) ---
-        patient_history, history_retrieved_success = get_patient_history_from_firestore(patient_id)
-        if not history_retrieved_success:
-            print(f"Warning: Could not retrieve patient history for {patient_id}: {patient_history}")
-            patient_history = "No detailed history found or could be retrieved."
+        patient_history = "No detailed history available." # Placeholder since function is removed
+        history_retrieved_success = False
         
         # --- Construct Specialist Email Content ---
         urgency_prefix = "URGENT: " if urgent else ""

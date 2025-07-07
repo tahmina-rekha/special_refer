@@ -35,7 +35,7 @@ if not firebase_admin._apps:
 else:
     try:
         db = firestore.client(database_id="book-appointment")
-        print("Firebase app already initialized, Firestore client obtained.")
+        print("Firestore client initialized for database 'book-appointment'.")
     except Exception as e:
         print(f"CRITICAL ERROR: Failed to obtain Firestore client when Firebase app already initialized: {e}")
         raise
@@ -66,11 +66,6 @@ def send_email_via_smtp(to_email, subject, plain_text_content, html_content):
         msg["To"] = to_email
         msg["Subject"] = subject
 
-        part1 = MIMEText(plain_text_content, "plain")
-        part2 = MIMEText(html_content, "html")
-        msg.attach(part1)
-        msg.attach(part2)
-
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
             server.starttls()
             server.login(SMTP_USERNAME, SMTP_PASSWORD)
@@ -79,7 +74,7 @@ def send_email_via_smtp(to_email, subject, plain_text_content, html_content):
         print(f"SMTP email sent successfully to {to_email}")
         return True, "Email sent successfully via SMTP."
 
-    except smtplib.SMTPAuthenticationError as e:
+    except smtpllib.SMTPAuthenticationError as e:
         print(f"SMTP Authentication Error: Check username/password for {SMTP_USERNAME}. Error: {e}")
         return False, f"SMTP authentication failed: {str(e)}. Please check SMTP username and password."
     except smtplib.SMTPConnectError as e:
@@ -332,16 +327,27 @@ def send_referral_email_backend():
         # --- Input Validation ---
         email_regex = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
         
+        # DEBUG PRINTS START
+        print(f"DEBUG: recipient_email: '{recipient_email}' (type: {type(recipient_email)})")
+        print(f"DEBUG: final_patient_name: '{final_patient_name}' (type: {type(final_patient_name)})")
+        print(f"DEBUG: referring_doctor: '{referring_doctor}' (type: {type(referring_doctor)})")
+        print(f"DEBUG: treatment_details: '{treatment_details}' (type: {type(treatment_details)})")
+        print(f"DEBUG: All required fields check: {all([recipient_email, final_patient_name, referring_doctor, treatment_details])}")
+        print(f"DEBUG: recipient_email regex match: {re.match(email_regex, recipient_email) is not None}")
+        # DEBUG PRINTS END
+
         if not all([recipient_email, final_patient_name, referring_doctor, treatment_details]):
+            print("ERROR: Missing one or more required referral details (recipient_email, patient_name, referring_doctor, treatment_details).")
             return jsonify({"success": False, "message": "Missing one or more required referral details (recipient_email, patient_name, referring_doctor, treatment_details)."}), 400
         
         if not isinstance(recipient_email, str) or not re.match(email_regex, recipient_email):
+            print(f"ERROR: Invalid recipient email format provided: '{recipient_email}'")
             return jsonify({"success": False, "message": "Invalid recipient email format provided."}), 400
         
         # Validate patient email only if a final_patient_email is determined
         if final_patient_email and (not isinstance(final_patient_email, str) or not re.match(email_regex, final_patient_email)):
+            print(f"ERROR: Invalid patient email format from database: '{final_patient_email}'")
             return jsonify({"success": False, "message": "Invalid patient email format from database."}), 400 # Changed message
-
 
         # --- Assign Specialist Appointment Date/Time ---
         assigned_date = None
